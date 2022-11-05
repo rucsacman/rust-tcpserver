@@ -1,89 +1,124 @@
 use std::{
+    borrow::BorrowMut,
     collections::{HashMap, VecDeque},
-    str::from_utf8,
     sync::{
         atomic::{AtomicUsize, Ordering},
-        Arc, RwLock,}, borrow::BorrowMut
+        Arc, RwLock,
+    },
+    time::Duration,
 };
-use serde::de::value;
 use tokio::{
-    io::{ AsyncWriteExt, AsyncReadExt},
+    io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
-    // sync::broadcast::{self, Receiver},
-    // runtime::Runtime
+    time::timeout,
 };
 #[tokio::main]
 async fn main() {
-    let  mut client_object: HashMap<usize, VecDeque<String>> = HashMap::new();
+    let client_object: HashMap<usize, VecDeque<String>> = HashMap::new();
     let client_object_lock = Arc::new(RwLock::new(client_object));
 
     let listener = TcpListener::bind("127.0.0.1:7878").await.unwrap();
-    //let pool = ThreadPool::new(4);
-    loop{
+    loop {
         let (stream, _addr) = listener.accept().await.unwrap();
         let c_client_object_lock = Arc::clone(&client_object_lock);
         tokio::spawn(async move {
-            
             println!("Connection Established");
             handle_connection(stream, &mut c_client_object_lock.clone()).await;
         });
     }
 }
 
-
-async fn handle_connection(mut stream:TcpStream, client_lock: &mut Arc<RwLock<HashMap<usize, VecDeque<String>>>>) {
-    let client_id = get_id()-1;
+async fn handle_connection(
+    mut stream: TcpStream,
+    client_lock: &mut Arc<RwLock<HashMap<usize, VecDeque<String>>>>,
+) {
+    let client_id = get_id() - 1;
     {
         let boradcast_map = &mut *client_lock.write().unwrap();
         boradcast_map.insert(client_id, VecDeque::new());
-        println!("size: {}",boradcast_map.len());
+        println!("size: {}", boradcast_map.len());
     }
 
-    loop{
+    let mut index = 0;
+
+    loop {
         let mut buffer = [1; 500];
-        let len = stream.read(&mut buffer).await.unwrap();
-        let mut boradcast_vec;
+        let mut len = 0;
 
-        {
-            let client_map = &mut *client_lock.write().unwrap();
-            let message = String::from_utf8_lossy(&mut buffer[..len]);
-            
-            
-            for (key, value) in &mut *client_map {
-                println!("key: {}", key);
-                value.push_back(message.to_string());
+        match timeout(Duration::from_millis(50), stream.read(&mut buffer)).await {
+            Ok(result) => {
+                let result = match result {
+                    Ok(bytes) => {
+                        // println!("received bytes {}", bytes);
+                        len = bytes
+                    }
+                    Err(e) => {
+                        println!("unable to read the data from the stream error: {}", e);
+                        len = 0;
+                        return;
+                    }
+                };
+                result
             }
-            boradcast_vec = client_map.get_mut(&client_id).unwrap().clone();
-        }
-        {
-            let client_map = &mut *client_lock.write().unwrap();
-            for (key, value) in &mut *client_map {
-                println!("key: {}", key);
-                for client_message in value.iter() {
-                    println!("loop message: {}", client_message);
+            Err(_) => {
+                len = 0;
+            }
+        };
+
+        let mut boradcast_vec = VecDeque::new();
+
+        if len > 3 {
+            {
+                let client_map = &mut *client_lock.write().unwrap();
+                let message = String::from_utf8_lossy(&mut buffer[..len]);
+
+                for (key, message_deque) in &mut *client_map {
+                    println!("clinet: {} | Push back :  key: {}  value : {} ", client_id, key, message);
+                    message_deque.push_back(message.to_string());
                 }
-                print!("________________________________________________________________");
+                boradcast_vec = client_map.get_mut(&client_id).unwrap().clone();
             }
-
         }
+
         let mut borrow_vec = boradcast_vec.borrow_mut();
-        loop{
+        let mut message: String = String::new();
+       
+        loop {
             if borrow_vec.len() == 0 {
                 break;
-            } 
-            let value = borrow_vec.pop_front().unwrap();
-            println!("Write: {}", value);
-                let _ = stream.write(value.as_bytes()).await.unwrap();
-                let _ = stream.flush().await.unwrap();
-        }
-        // for client_message in boradcast_vec.iter() {
-        //     println!("{} message: {}", client_id, client_message);
-        // }
+            }
 
-       
+            let value = borrow_vec.pop_front().unwrap();
+            message.push_str(&value);
+
+            match timeout(Duration::from_millis(50), stream.write(value.as_bytes())).await {
+                Ok(result) => {
+                    let result = match result {
+                        Ok(bytes) => {
+                            let _ = stream.flush().await.unwrap();
+                            len = bytes  
+                        }
+                        Err(e) => {
+                            println!("unable to write the data from the stream error: {}", e);
+                            len = 0;
+                        }
+                    };
+                    result
+                }
+                Err(_) => {
+                    len = 0;
+                }
+            };
+        }
+        {
+            let client_map = &mut *client_lock.write().unwrap();
+            client_map.get_mut(&client_id).unwrap().clear();
+            message.clear();
+            borrow_vec.clear()
+        }
+
     }
 }
-
 
 fn get_id() -> usize {
     static COUNTER: AtomicUsize = AtomicUsize::new(1);

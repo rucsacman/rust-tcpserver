@@ -1,32 +1,45 @@
+
 use std::{
-    str,
-    io::{self,prelude::*,BufReader,Write},    //To handle the input and output
-    net:: TcpStream,  //To server and client need to communicate
+    thread,
+    io::{self, Read, Write},
+    net::TcpStream,
+    time::Duration,
 };
 
+fn main() {
 
-use std::env;
-
-
-fn main() -> io::Result<( )> {
-
-    env::set_var("RUST_BACKTRACE", "1");
-    let mut stream = TcpStream::connect("127.0.0.1:7878")?;
+	let mut stream = TcpStream::connect("127.0.0.1:7878").expect("Connection faild");
+	let mut input_stream = stream.try_clone().unwrap();
+    let duration = Duration::from_millis(50);
     
-    for _ in 0 .. 1000 {
-        let mut input = String::new();
-        io::stdin().read_line(&mut input).expect("Failed to read");
-        stream.write(input.as_bytes()).expect("failed to write");
+	thread::spawn(move || {
+        let mut client_buffer = [0u8; 1024];
+        // input_stream.set_read_timeout(Some(duration));
 
-        let mut reader =BufReader::new(&stream);
+		loop {
+			match input_stream.read(&mut client_buffer) {
+				Ok(n) => {
 
-        let mut buffer: Vec<u8> = Vec::new();
-        reader.read_until(b'\n',&mut buffer)?;
-       
-        println!("read from server:{}",str::from_utf8(&buffer).unwrap());
-        println!("");
+						io::stdout().write(&client_buffer).unwrap();
+						io::stdout().flush().unwrap();
+                        thread::sleep(duration);
+				},
+				Err(error) => {
+                    println!("Connection Failed {}", error);
+                    break;
+                },
+			}
+            TcpStream::connect_timeout(&"127.0.0.1:7878".parse().unwrap(), duration).unwrap();
+		}
+	});
 
-    } 
+    let output_stream = &mut stream;
+    let mut user_buffer = String::new();
 
-    Ok(())
+    loop {
+        io::stdin().read_line(&mut user_buffer).unwrap();
+
+        output_stream.write(user_buffer.as_bytes()).unwrap();
+        output_stream.flush().unwrap();
+    }
 }
